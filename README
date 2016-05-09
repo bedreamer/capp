@@ -1,0 +1,75 @@
+CAPP
+=====
+
+CAPP is a universal application frame base on ANSI C language,
+CAPP 是一个基于ANSI C语言的通用应用程序框架，
+this frame could be used in FILE IO, SOCKET IO,
+这个框架可以被用于文件IO，SOCKET IO，
+
+使用这个框架可以流程化你的文件管理，
+
+QUIK START
+======
+下面是一个快速开始使用的例子：
+// main.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+#include "capp.h"
+
+CAPP_RESULT capp_main(struct capp *self, CAPP_EVT evt)
+{
+    char buff[64] = {0};
+    int len  = 0;
+
+    switch(evt)
+    {
+    // capp initlize event
+    case CAPP_EVT_INIT:
+        return CAPP_RESULT_OK;
+    // capp open file event
+    case CAPP_EVT_OPEN:
+        self->fds = open("/dev/stdout", O_WRONLY);
+        self->mode = CAPP_MODE_WO;
+        return CAPP_RESULT_OK;
+    // capp file is writable event
+    case CAPP_EVT_WRITABLE:
+        (char *)self->some_param ++;
+        len = sprintf(buff, "Hello World %d\n", (int)self->some_param);
+        write(self->fds, buff, len);
+        return CAPP_RESULT_EXIT;
+    // capp file is exception event
+    case CAPP_EVT_EXCEPT:
+        return CAPP_RESULT_EXIT;
+    // capp close file event
+    case CAPP_EVT_CLOSE:
+    case CAPP_EVT_READABLE:
+    default:
+        return CAPP_RESULT_EXIT;
+    }
+    return CAPP_RESULT_EXIT;
+}
+
+int main()
+{
+    struct cframe *root = NULL;
+    struct capp *capp = NULL;
+    void *private_data = NULL;
+
+    root = create_cframe();
+    if ( ! root ) {
+        return 1;
+    }
+    capp = cframe_registe_capp(root, capp_main, private_data);
+    if ( ! capp ) {
+        return 1;
+    }
+    while (1) {
+        cframe_run(root, 50);
+    }
+
+    return 0;
+}
+
