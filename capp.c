@@ -5,15 +5,30 @@
 //  Created by 李杰 on 16/4/18.
 //  Copyright (c) 2016年 李杰. All rights reserved.
 //
+#include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
-#include <sys/socket.h>
-#include <sys/shm.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <pthread.h>
+#include <time.h>
+#include <stdarg.h>
+#include <malloc.h>
+#include <ifaddrs.h>
+#include <signal.h>
+#include <netdb.h>
 #include <fcntl.h>
+#include <termios.h>
+#include <errno.h>
+#include <net/if.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <netinet/in.h>
+#include <linux/can.h>
+#include <linux/can/raw.h>
+#include <arpa/inet.h>
 #include "capp.h"
 
 // 初始化文件APP框架
@@ -46,6 +61,7 @@ struct capp *cframe_registe_capp(struct cframe* root, CAPP_MAIN capp_main, void 
     app->some_param = some_param;
     app->fds = -1;
     app->mode = CAPP_MODE_INVALID;
+    app->root = root;
 
     // 将应用对象添加到列表中
     while ( *thiz ) thiz = &(*thiz)->next;
@@ -54,14 +70,41 @@ struct capp *cframe_registe_capp(struct cframe* root, CAPP_MAIN capp_main, void 
     return app;
 }
 
-// 创建一个基于SOCKET的APP对象
-int new_socket_capp()
+// 注销capp
+void cframe_unregiste_capp(struct cframe *root, struct capp *app)
 {
-    return 0;
+    if ( ! root || ! app ) return;
+    struct capp ** search_desnation[] = {
+        &root->normal_childs,
+        &root->disabled_childs,
+        &root->unregisted_childs,
+        &root->new_childs,
+    };
+    int i = 0;
+
+    for ( i = 0; i < sizeof(search_desnation)/sizeof(struct capp **); i ++ ) {
+        struct capp **thiz = search_desnation[i];
+        while ( 1 ) {
+            if ( ! *thiz ) return;
+
+            if ( *thiz != app ) {
+                thiz = &(*thiz)->next;
+                continue;
+            }
+            struct capp *found = *thiz;
+            *thiz = (*thiz)->next;
+
+            printf("销毁");
+
+            found->capp_main(found, CAPP_EVT_CLOSE);
+            free(found);
+            return;
+        }
+    }
 }
 
 // 处理可读文件
-void cframe_process_files(struct capp **apps, struct fd_set *rd_fds, struct fd_set *wr_fds, struct fd_set *exp_fds)
+void cframe_process_files(struct capp **apps, fd_set *rd_fds, fd_set *wr_fds, fd_set *exp_fds)
 {
     struct capp *thiz = NULL;
     CAPP_RESULT capp_result = CAPP_RESULT_OK;
@@ -126,21 +169,40 @@ int cframe_process_new_capp(struct cframe *root, struct capp **normal_apps, stru
         
         // 2. 执行初始化和打开文件操作
         // 2.1 没有有效的事件处理函数接口
-        if ( ! thiz_app->capp_main ) continue;
-        
+        if ( ! thiz_app->capp_main ) {
+            free(thiz_app);
+            continue;
+        }
+
         capp_result = thiz_app->capp_main(thiz_app, CAPP_EVT_INIT);
         // 2.2 初始化失败
-        if ( capp_result != CAPP_RESULT_OK ) continue;
+        if ( capp_result != CAPP_RESULT_OK ) {
+            thiz_app->capp_main(thiz_app, CAPP_EVT_CLOSE);
+            free(thiz_app);
+            continue;
+        }
 
         capp_result = thiz_app->capp_main(thiz_app, CAPP_EVT_OPEN);
         // 2.3 打开文件失败
-        if ( capp_result != CAPP_RESULT_OK ) continue;
+        if ( capp_result != CAPP_RESULT_OK ) {
+            thiz_app->capp_main(thiz_app, CAPP_EVT_CLOSE);
+            free(thiz_app);
+            continue;
+        }
         
         // 2.4 检测文件打开模式
-        if ( thiz_app->mode == CAPP_MODE_INVALID ) continue;
-        
+        if ( thiz_app->mode == CAPP_MODE_INVALID ) {
+            thiz_app->capp_main(thiz_app, CAPP_EVT_CLOSE);
+            free(thiz_app);
+            continue;
+        }
+
         // 2.5 检测文件描述符有效性
-        if ( thiz_app->fds == -1 ) continue;
+        if ( thiz_app->fds == -1 ) {
+            thiz_app->capp_main(thiz_app, CAPP_EVT_CLOSE);
+            free(thiz_app);
+            continue;
+        }
 
         thiz_app->disabled = CAPP_ENABLED;
         thiz_app->root = root;
@@ -155,7 +217,7 @@ int cframe_process_new_capp(struct cframe *root, struct capp **normal_apps, stru
 }
 
 // 设置指定模式的文件描述符
-int cframe_set_fds(struct capp *apps, CAPP_MODE mode, struct fd_set *fds_set)
+int cframe_set_fds(struct capp *apps, CAPP_MODE mode, fd_set *fds_set)
 {
     int max_fds = -1;
     struct capp *thiz = NULL;
@@ -177,7 +239,7 @@ int cframe_set_fds(struct capp *apps, CAPP_MODE mode, struct fd_set *fds_set)
 // 将框架中的文件扫描一遍
 int cframe_run(struct cframe *root, int ms)
 {
-    struct fd_set readable_set, writable_set, exp_set;
+    fd_set readable_set, writable_set, exp_set;
     int select_return = 0;
     int select_timeout_s = 0, select_timeout_ms = 50;
     struct timeval tv;
@@ -242,10 +304,11 @@ int cframe_run(struct cframe *root, int ms)
     return 0;
 }
 
-CAPP_RESULT capp_socket_server(struct capp *self, CAPP_EVT evt)
+#if (CONFIG_SUPPORT_SOCKET > 0)
+// CAPP socket服务外壳
+CAPP_RESULT capp_socket_server_main(struct capp *self, CAPP_EVT evt)
 {
     int ret  = 0;
-    struct socket_server *server = (struct socket_server *)self->some_param;
 
     switch(evt)
     {
@@ -254,34 +317,42 @@ CAPP_RESULT capp_socket_server(struct capp *self, CAPP_EVT evt)
             return CAPP_RESULT_OK;
             // capp open file event
         case CAPP_EVT_OPEN:
-            // 金蝉脱壳
-            self->fds = server->server_fds;
-            self->some_param = server->new_client_proc;
+            self->fds = self->socket_fds;
             self->mode = CAPP_MODE_RO;
+            //printf("打开服务端\n");
             return CAPP_RESULT_OK;
             // capp file is writable event
-        case CAPP_EVT_READABLE:{
-            printf("new client");
-            struct sockaddr_in client_addr;
-            socklen_t length = sizeof(client_addr);
-            
-            ///成功返回非负描述字，出错返回-1
-            int conn = accept(self->fds, (struct sockaddr*)&client_addr, &length);
-            if(conn<0) {
-                perror("accept connect failed");
-                exit(1);
+        case CAPP_EVT_READABLE:
+            {
+                //printf("new client");
+                struct sockaddr_in client_addr;
+                socklen_t length = sizeof(client_addr);
+                struct capp *client;
+
+                //成功返回非负描述字，出错返回-1
+                int conn = accept(self->fds, (struct sockaddr*)&client_addr, &length);
+                if ( conn < 0 ) {
+                    perror("accept connect failed");
+                    return CAPP_RESULT_OK;
+                }
+                //printf("start accept data from Client...\r\n");
+                client = cframe_registe_capp(self->root, self->new_client_proc, self->new_client_param);
+                if ( client ) {
+                    client->socket_fds = conn;
+                    /**
+                     * 在这里将服务端的socket句柄传递给客户端保存起来，以便服务端主动停止时使用
+                     */
+                    client->socket_server_fds = self->fds;
+                }
+                return CAPP_RESULT_OK;
             }
-            printf("start accept data from Client...\r\n");
-            cframe_registe_capp(self->root, (CAPP_MAIN)self->some_param, (void*)(int *)conn);
-            return CAPP_RESULT_OK;
-        }
             // capp file is exception event
         case CAPP_EVT_EXCEPT:
             return CAPP_RESULT_EXIT;
             // capp close file event
         case CAPP_EVT_CLOSE:
             close(self->fds);
-            printf("{close}\n");
+            printf("socket server closed!\n");
             return CAPP_RESULT_EXIT;
         case CAPP_EVT_WRITABLE:
         default:
@@ -291,34 +362,31 @@ CAPP_RESULT capp_socket_server(struct capp *self, CAPP_EVT evt)
 }
 
 // 创建一个基于TCP的服务器
-struct capp *capp_start_socket_server(struct cframe* root, CAPP_MAIN capp_main, void *server_param, int port, int maxclients)
+struct capp *capp_start_socket_server(struct cframe *root, CAPP_MAIN new_client_proc, void *server_param, void *client_param, int port, int maxclients)
 {
     struct sockaddr_in server_sockaddr;
     int ret;
     int server_sockfd;
     struct capp *self;
-    
-    if (root == NULL ) return NULL;
+
     server_sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if ( server_sockfd == -1 ) return NULL;
     server_sockaddr.sin_family = AF_INET;
     server_sockaddr.sin_port = htons (port);
     server_sockaddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    ret = bind(server_sockfd, (struct sockaddr *)&server_sockaddr, sizeof(server_sockaddr));
+    ret = bind(server_sockfd, (struct sockaddr *)&server_sockaddr,sizeof(server_sockaddr));
     if ( ret != 0 ) {
         close(server_sockfd);
         return NULL;
     }
     if ( maxclients <= 0 ) maxclients = 1;
     if ( 0 == listen(server_sockfd, maxclients) ) {
-        struct socket_server *server = (struct socket_server *)malloc(sizeof(struct socket_server));
-        server->new_client_proc = capp_main;
-        server->server_fds = server_sockfd;
-        server->server_param = server_param;
-        self = cframe_registe_capp(root, capp_socket_server, server);
-        if ( !self ) goto die;
-        self->root = root;
+        self = cframe_registe_capp(root, capp_socket_server_main, server_param);
+        if ( ! self ) goto die;
+        self->socket_fds = server_sockfd;
+        self->new_client_proc = new_client_proc;
+        self->new_client_param = client_param;
         return self;
     }
 die:
@@ -326,32 +394,80 @@ die:
     return NULL;
 }
 
-// 创建一个基于TCP的客户端
-struct capp *capp_start_socket_client(struct cframe* root, CAPP_MAIN capp_main, void *client_param, const char *host, int port)
+struct capp *search_socket_client(struct cframe *root, struct capp *server_app)
 {
-    struct sockaddr_in client_sockaddr;
+    if ( ! root || ! server_app ) return;
+    struct capp ** search_desnation[] = {
+        &root->normal_childs,
+        &root->disabled_childs,
+        &root->unregisted_childs,
+        &root->new_childs,
+    };
+    int i;
+
+    for ( i = 0; i < sizeof(search_desnation)/sizeof(struct capp **); i ++ ) {
+        struct capp **thiz = search_desnation[i];
+        while ( 1 ) {
+            if ( ! *thiz ) return NULL;
+            if ( (*thiz)->socket_server_fds != server_app->fds ) {
+                thiz = &(*thiz)->next;
+                continue;
+            }
+            return *thiz;
+        }
+    }
+    return NULL;
+}
+
+/** 销毁TCP服务器
+ *  需要同时销毁连接在该服务器的所有客户端应用
+*/
+void capp_destroy_socket_server(struct cframe *root, struct capp *server_app)
+{
+    struct capp *client = NULL;
+
+    while ( 1 ) {
+        client = search_socket_client(root, server_app);
+        printf("搜索 %p\n", client);
+        if ( ! client ) break;
+        cframe_unregiste_capp(root, client);
+        printf("销毁        cframe_unregiste_capp(root, client);\n");
+    }
+    cframe_unregiste_capp(root, server_app);
+    printf("销毁        cframe_unregiste_capp(root, server_app);\n");
+}
+
+// 创建一个基于TCP的客户端
+struct capp *capp_start_socket_client(struct cframe *root, CAPP_MAIN session_proc, void *client_param, const char *host, int port)
+{
+    struct sockaddr_in server_sockaddr;
     int ret;
     int client_sockfd;
     struct capp *self;
-    
-    if (root == NULL ) return NULL;
+
     client_sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if ( client_sockfd == -1 ) return NULL;
-    client_sockaddr.sin_family = AF_INET;
-    client_sockaddr.sin_port = htons (port);
-    client_sockaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    
-    ret = bind(client_sockfd, (struct sockaddr *)&client_sockaddr, sizeof(client_sockaddr));
-    if ( ret != 0 ) {
-        close(client_sockfd);
-        return NULL;
+    server_sockaddr.sin_family = AF_INET;
+    server_sockaddr.sin_port = htons (port);
+    server_sockaddr.sin_addr.s_addr = inet_addr(host);
+    ret = connect(client_sockfd, (struct sockaddr *)&server_sockaddr, sizeof(server_sockaddr));
+    if (-1 == ret ) {
+        perror("Failed to connect");
+        goto die;
     }
-    self = cframe_registe_capp(root, capp_main, (void*)client_sockfd);
-    if ( !self ) goto die;
-    self->root = root;
+
+    self = cframe_registe_capp(root, session_proc, client_param);
+    if ( ! self ) goto die;
+    self->socket_fds = client_sockfd;
     return self;
 die:
     close(client_sockfd);
     return NULL;
 }
 
+// 销毁TCP客户端
+void capp_destroy_socket_client(struct cframe *root, struct capp *client_app)
+{
+}
+
+#endif
