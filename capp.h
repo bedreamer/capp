@@ -9,13 +9,15 @@
 #ifndef __cframe__capp__
 #define __cframe__capp__
 
+#define CAPP_VERSION "1.0.1"
+
 #include <stdio.h>
 // 同一个CFRAME中支持最多128个APP
 #define MAX_APPS    128
 struct capp;
 struct cframe;
-typedef unsigned int id_t;
-#define ID_INVALID  0
+#define CONFIG_SUPPORT_SOCKET  1
+
 
 // CAPP 框架事件
 typedef enum {
@@ -68,15 +70,83 @@ typedef CAPP_RESULT (*CAPP_MAIN)(struct capp *self, CAPP_EVT evt);
 
 // 框架内的应用程序描述
 struct capp {
-    // 文件操作符
+    /**
+     * 文件操作符
+     * 如果是socket句柄，则需要在收到事件CAPP_EVT_OPEN后将socket的读写句柄赋值给该成员
+     * 例如:
+     * CAPP_RESULT capp_main_proc(struct capp *self, CAPP_EVT evt) {
+     *      switch(evt) {
+     *          case CAPP_EVT_OPEN:
+     *              ....
+     *              self->fds = self->socket_fds;  // 必须手动添加这一行
+     *              ....
+     *          break;
+     *          default:
+     *          break;
+     *      }
+     * }
+     */
     int fds;
     // 文件操作模式
     CAPP_MODE mode;
     // 使能标识
     CAPP_DISABLE disabled;
-    // 应用响应函数
+    /**
+     * 应用响应函数
+     * 对于socket服务端来说是固定的:
+     *    CAPP_RESULT capp_socket_server_main(struct capp *self, CAPP_EVT evt)
+     * 对于socket客户端来说该值是通过创建socket服务端时传入的新连接处理接口
+     * 对于创建的socket客户端来说，该值是注册APP时提供的回调函数
+     * 对于文件来说该值是文件的回调函数
+     */
     CAPP_MAIN capp_main;
     void *some_param;
+#if (CONFIG_SUPPORT_SOCKET > 0)
+    /**
+     * 服务端的socket句柄，或者新的连接socket句柄
+     * 服务端来源如下：
+     * .....
+     * socket_fds = socket();
+     * .....
+     * 客户端来源如下：
+     * ....
+     * server_socket_fds = socket()
+     * ....
+     * socket_fds = server_socket_fds.accept()
+     * ....
+     */
+    int socket_fds;
+
+    /**
+     * 用于TCP服务端启动的新应用参数
+     * 告知新的应用当前新的连接是从哪个socket连入的
+     * 也可用于服务端主动退出时搜索该服务端下存在的应用。
+     *
+     * ....
+     * socket_server_fds = socket()
+     * ....
+     * new_client_socket_fds = socket_server_fds.accept();
+     * ....
+     *
+     * 在为new_client_socket_fds生成APP后将socket_server_fds传给该APP
+     */
+    int socket_server_fds;
+
+    /**
+     * 用于服务端的新链接APP
+     * 该回调用于执行新链接的可写，可读，异常，打开，关闭等事件处理
+     * 告知服务端APP当有新的连接后使用哪个接口来处理该新的连接
+     */
+    CAPP_MAIN new_client_proc;
+
+    /**
+     * 用于服务端的新链接APP
+     * 是CFRAME框架传递给新连接APP的参数
+     */
+    void *new_client_param;
+
+    void *socket_param[4];
+#endif
     // 框架根
     struct cframe *root;
 
@@ -107,20 +177,20 @@ int cframe_disable_capp(struct cframe *root, struct capp *app);
 // 注册capp
 struct capp *cframe_registe_capp(struct cframe* root, CAPP_MAIN capp_main, void *some_param);
 // 注销capp
-int cframe_unregiste_capp(struct cframe *root, struct capp *app);
+void cframe_unregiste_capp(struct cframe *root, struct capp *app);
 
 // 将框架中的文件扫描一遍
 int cframe_run(struct cframe *root, int ms);
 
-// socket 服务器参数
-struct socket_server {
-    CAPP_MAIN  new_client_proc;
-    void *server_param;
-    int server_fds;
-};
+#if (CONFIG_SUPPORT_SOCKET > 0)
 // 创建一个基于TCP的服务器
-struct capp *capp_start_socket_server(struct cframe* root, CAPP_MAIN capp_main, void *server_param, int port, int maxclients);
+struct capp *capp_start_socket_server(struct cframe *root, CAPP_MAIN new_client_proc, void *server_param, void *client_param, int port, int maxclients);
+// 销毁TCP服务器
+void capp_destroy_socket_server(struct cframe *root, struct capp *);
 // 创建一个基于TCP的客户端
-struct capp *capp_start_socket_client(struct cframe* root, CAPP_MAIN capp_main, void *client_param, const char *host, int port);
+struct capp *capp_start_socket_client(struct cframe *root, CAPP_MAIN session_proc, void *client_param, const char *host, int port);
+// 销毁TCP客户端
+void capp_destroy_socket_client(struct cframe *root, struct capp *);
+#endif
 
 #endif /* defined(__cframe__capp__) */
